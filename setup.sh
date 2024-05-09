@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/local/bin/bash
 
 set -e
 
@@ -26,13 +26,16 @@ if [[ ${UNAME} == *"Darwin"* ]]; then
         echo '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
         exit 1
     fi
-    elif [[ -f /usr/bin/apt ]]; then
+elif [[ ${UNAME} == *"FreeBSD"* ]]; then
+    TARGET="freebsd"
+    echo "FreeBSD detected."
+elif [[ -f /usr/bin/apt ]]; then
     TARGET="debian"
     echo "Debian-based Linux detected."
-    elif [[ -f /usr/bin/pacman ]]; then
+elif [[ -f /usr/bin/pacman ]]; then
     TARGET="arch"
     echo "Arch Linux detected."
-    elif [[ -f /usr/bin/dnf ]]; then
+elif [[ -f /usr/bin/dnf ]]; then
     TARGET="fedora"
     echo "Fedora/openSUSE detected."
 else
@@ -47,10 +50,12 @@ fi
 if [[ "${UNAME}" == *"x86_64"* ]]; then
     ARCH="x86_64"
     echo "amd64 architecture confirmed."
-    elif [[ "${UNAME}" == *"aarch64"* ]] || [[ "${UNAME}" == *"arm64"* ]]; then
+elif [[ "${UNAME}" == *"amd64"* ]]; then
+    ARCH="x86_64"
+elif [[ "${UNAME}" == *"aarch64"* ]] || [[ "${UNAME}" == *"arm64"* ]]; then
     ARCH="aarch64"
     echo "aarch64 architecture confirmed."
-    elif [[ "${UNAME}" == *"armv7l"* ]]; then
+elif [[ "${UNAME}" == *"armv7l"* ]]; then
     ARCH="armv7l"
     echo "armv7l (32-bit) WARN: The Coqui and VOSK bindings are broken for this platform at the moment, so please choose Picovoice when the script asks. wire-pod is designed for 64-bit systems."
     STT=""
@@ -91,40 +96,42 @@ function getPackages() {
     if [[ ${TARGET} == "debian" ]]; then
         apt update -y
         apt install -y wget openssl net-tools libsox-dev libopus-dev make iproute2 xz-utils libopusfile-dev pkg-config gcc curl g++ unzip avahi-daemon git libasound2-dev libsodium-dev
-        elif [[ ${TARGET} == "arch" ]]; then
+    elif [[ ${TARGET} == "arch" ]]; then
         pacman -Sy --noconfirm
         sudo pacman -S --noconfirm wget openssl net-tools sox opus make iproute2 opusfile curl unzip avahi git libsodium go pkg-config
-        elif [[ ${TARGET} == "fedora" ]]; then
+    elif [[ ${TARGET} == "fedora" ]]; then
         dnf update
         dnf install -y wget openssl net-tools sox opus make opusfile curl unzip avahi git libsodium-devel
-        elif [[ ${TARGET} == "darwin" ]]; then
+    elif [[ ${TARGET} == "darwin" ]]; then
         sudo -u $SUDO_USER brew update
         sudo -u $SUDO_USER brew install wget pkg-config opus opusfile
+    elif [[ ${TARGET} == "freebsd" ]]; then
+        sudo pkg install wget pkgconf opus opusfile gmake curl unzip avahi git libsodium gcc13 go122 vosk-api
     fi
     touch ./vector-cloud/packagesGotten
     echo
     echo "Installing golang binary package"
     mkdir golang
     cd golang
-    if [[ ${TARGET} != "darwin" ]] && [[ ${TARGET} != "arch" ]]; then
+    if [[ ${TARGET} != "darwin" ]] && [[ ${TARGET} != "freebsd" ]] && [[ ${TARGET} != "arch" ]]; then
         if [[ ! -f /usr/local/go/bin/go ]]; then
             if [[ ${ARCH} == "x86_64" ]]; then
                 wget -q --show-progress --no-check-certificate https://go.dev/dl/go1.19.4.linux-amd64.tar.gz
                 rm -rf /usr/local/go && tar -C /usr/local -xzf go1.19.4.linux-amd64.tar.gz
-                elif [[ ${ARCH} == "aarch64" ]]; then
+            elif [[ ${ARCH} == "aarch64" ]]; then
                 wget -q --show-progress --no-check-certificate https://go.dev/dl/go1.19.4.linux-arm64.tar.gz
                 rm -rf /usr/local/go && tar -C /usr/local -xzf go1.19.4.linux-arm64.tar.gz
-                elif [[ ${ARCH} == "armv7l" ]]; then
+            elif [[ ${ARCH} == "armv7l" ]]; then
                 wget -q --show-progress --no-check-certificate https://go.dev/dl/go1.19.4.linux-armv6l.tar.gz
                 rm -rf /usr/local/go && tar -C /usr/local -xzf go1.19.4.linux-armv6l.tar.gz
             fi
             ln -s /usr/local/go/bin/go /usr/bin/go
         fi
     else
-        echo "This is a macOS or arch target, assuming Go is installed already"
-        if [[ ${TARGET} == "arch" ]] && [[ ! -d /usr/local/go/bin ]]; then
+        echo "This is a macOS, FreeBSD, or arch target, assuming Go is installed already"
+        if [[ ${TARGET} == "arch" ]] || [[ ${TARGET} == "freebsd" ]] && [[ ! -d /usr/local/go/bin ]]; then
             mkdir -p /usr/local/go/bin
-            ln -s /usr/bin/go /usr/local/go/bin/go
+            ln -s /usr/local/bin/go122 /usr/local/go/bin/go
         fi
     fi
     cd ..
@@ -187,7 +194,7 @@ function getSTT() {
         echo "export STT_SERVICE=leopard" >> ./chipper/source.sh
         echo "export PICOVOICE_APIKEY=${picoKey}" >> ./chipper/source.sh
         echo "export PICOVOICE_APIKEY=${picoKey}" > ./chipper/pico.key
-        elif [[ ${sttService} == "vosk" ]]; then
+    elif [[ ${sttService} == "vosk" ]]; then
         echo "export STT_SERVICE=vosk" >> ./chipper/source.sh
         origDir="$(pwd)"
         if [[ ! -f ./vosk/completed ]]; then
@@ -199,30 +206,34 @@ function getSTT() {
             if [[ ${TARGET} == "darwin" ]]; then
                 VOSK_VER="0.3.42"
                 VOSK_DIR="vosk-osx-${VOSK_VER}"
-                elif [[ ${ARCH} == "x86_64" ]]; then
+            elif [[ ${TARGET} == "freebsd" ]]; then
+                echo "On FreeBSD, using vosk from ports"
+                export CGO_CFLAGS="-I/usr/local/include"
+                export CGO_LDFLAGS="-L /usr/local/lib -lvosk"        
+            elif [[ ${ARCH} == "x86_64" ]]; then
                 VOSK_DIR="vosk-linux-x86_64-${VOSK_VER}"
-                elif [[ ${ARCH} == "aarch64" ]]; then
+            elif [[ ${ARCH} == "aarch64" ]]; then
                 VOSK_DIR="vosk-linux-aarch64-${VOSK_VER}"
-                elif [[ ${ARCH} == "armv7l" ]]; then
+            elif [[ ${ARCH} == "armv7l" ]]; then
                 VOSK_DIR="vosk-linux-armv7l-${VOSK_VER}"
             fi
-            VOSK_ARCHIVE="$VOSK_DIR.zip"
-            wget -q --show-progress --no-check-certificate "https://github.com/alphacep/vosk-api/releases/download/v${VOSK_VER}/${VOSK_ARCHIVE}"
-            unzip "$VOSK_ARCHIVE"
-            mv "$VOSK_DIR" libvosk
-            rm -fr "$VOSK_ARCHIVE"
+            # VOSK_ARCHIVE="$VOSK_DIR.zip"
+            # wget -q --show-progress --no-check-certificate "https://github.com/alphacep/vosk-api/releases/download/v${VOSK_VER}/${VOSK_ARCHIVE}"
+            # unzip "$VOSK_ARCHIVE"
+            # mv "$VOSK_DIR" libvosk
+            # rm -fr "$VOSK_ARCHIVE"
             
             cd ${origDir}/chipper
             export CGO_ENABLED=1
-            export CGO_CFLAGS="-I${ROOT}/.vosk/libvosk"
-            export CGO_LDFLAGS="-L ${ROOT}/.vosk/libvosk -lvosk -ldl -lpthread"
-            export LD_LIBRARY_PATH="${ROOT}/.vosk/libvosk:$LD_LIBRARY_PATH"
+            # export CGO_CFLAGS="-I${ROOT}/.vosk/libvosk"
+            # export CGO_LDFLAGS="-L ${ROOT}/.vosk/libvosk -lvosk -ldl -lpthread"
+            # export LD_LIBRARY_PATH="${ROOT}/.vosk/libvosk:$LD_LIBRARY_PATH"
             /usr/local/go/bin/go get -u github.com/kercre123/vosk-api/go/...
             /usr/local/go/bin/go get github.com/kercre123/vosk-api
             /usr/local/go/bin/go install github.com/kercre123/vosk-api/go
             cd ${origDir}
         fi
-        elif [[ ${sttService} == "whisper" ]]; then
+    elif [[ ${sttService} == "whisper" ]]; then
         echo "export STT_SERVICE=whisper.cpp" >> ./chipper/source.sh
         origDir="$(pwd)"
         echo "Getting Whisper assets"
@@ -358,7 +369,7 @@ function IPDNSPrompt() {
 }
 
 function IPPrompt() {
-    if [[ ${TARGET} == "darwin" ]]; then
+    if [[ ${TARGET} == "darwin" || ${TARGET} == "freebsd" ]]; then
         IPADDRESS=$(ifconfig | grep "inet " | grep -v 127.0.0.1 | cut -d\  -f2)
     else
         IPADDRESS=$(ip -4 addr | grep $(ip addr | awk '/state UP/ {print $2}' | sed 's/://g') | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
@@ -532,8 +543,8 @@ function scpToBot() {
 }
 
 function setupSystemd() {
-    if [[ ${TARGET} == "darwin" ]]; then
-        echo "This cannot be done on macOS."
+    if [[ ${TARGET} == "darwin" || ${TARGET} == "freebsd" ]]; then
+        echo "This cannot be done on macOS or FreeBSD."
         exit 1
     fi
     if [[ ! -f ./chipper/source.sh ]]; then
@@ -604,8 +615,8 @@ function setupSystemd() {
 }
 
 function disableSystemd() {
-    if [[ ${TARGET} == "darwin" ]]; then
-        echo "This cannot be done on macOS."
+    if [[ ${TARGET} == "darwin" || ${TARGET} == "freebsd" ]]; then
+        echo "This cannot be done on macOS or FreeBSD."
         exit 1
     fi
     echo

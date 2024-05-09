@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/local/bin/bash
 
 UNAME=$(uname -a)
 
@@ -83,15 +83,14 @@ if [[ ${STT_SERVICE} == "leopard" ]]; then
     elif [[ ${STT_SERVICE} == "vosk" ]]; then
     if [[ -f ./chipper ]]; then
         export CGO_ENABLED=1
-        export CGO_CFLAGS="-I/root/.vosk/libvosk"
-        export CGO_LDFLAGS="-L /root/.vosk/libvosk -lvosk -ldl -lpthread"
-        export LD_LIBRARY_PATH="/root/.vosk/libvosk:$LD_LIBRARY_PATH"
+        export CGO_CFLAGS="-I/usr/local/include"
+        export CGO_LDFLAGS="-L /usr/local/lib -lvosk "
+        # export LD_LIBRARY_PATH="/root/.vosk/libvosk:$LD_LIBRARY_PATH"
         ./chipper
     else
         export CGO_ENABLED=1
-        export CGO_CFLAGS="-I/root/.vosk/libvosk"
-        export CGO_LDFLAGS="-L /root/.vosk/libvosk -lvosk -ldl -lpthread"
-        export LD_LIBRARY_PATH="/root/.vosk/libvosk:$LD_LIBRARY_PATH"
+        export CGO_CFLAGS="-I/usr/local/include"
+        export CGO_LDFLAGS="-L /usr/local/lib -lvosk "
         /usr/local/go/bin/go run -tags $GOTAGS -exec "env DYLD_LIBRARY_PATH=$HOME/.vosk/libvosk" cmd/vosk/main.go
     fi
 else
