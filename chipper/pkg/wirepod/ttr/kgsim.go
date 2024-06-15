@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ func PlaceChat(chat vars.RememberedChat) {
 	for i, achat := range vars.RememberedChats {
 		if achat.ESN == chat.ESN {
 			vars.RememberedChats[i] = chat
+			vars.SaveChats()
 			return
 		}
 	}
@@ -39,16 +41,10 @@ func PlaceChat(chat vars.RememberedChat) {
 }
 
 // remember last 16 lines of chat
-func Remember(user, ai, esn string) {
+func Remember(user, ai openai.ChatCompletionMessage, esn string) {
 	chatAppend := []openai.ChatCompletionMessage{
-		{
-			Role:    openai.ChatMessageRoleUser,
-			Content: user,
-		},
-		{
-			Role:    openai.ChatMessageRoleAssistant,
-			Content: ai,
-		},
+		user,
+		ai,
 	}
 	currentChat := GetChat(esn)
 	if len(currentChat.Chats) == 16 {
@@ -67,25 +63,14 @@ func Remember(user, ai, esn string) {
 	PlaceChat(currentChat)
 }
 
-func StreamingKGSim(req interface{}, esn string, transcribedText string) (string, error) {
-	var fullRespText string
-	var fullRespSlice []string
-	var isDone bool
-	var c *openai.Client
-	if vars.APIConfig.Knowledge.Provider == "together" {
-		if vars.APIConfig.Knowledge.Model == "" {
-			vars.APIConfig.Knowledge.Model = "meta-llama/Llama-2-70b-chat-hf"
-			vars.WriteConfigToDisk()
-		}
-		conf := openai.DefaultConfig(vars.APIConfig.Knowledge.Key)
-		conf.BaseURL = "https://api.together.xyz/v1"
-		c = openai.NewClientWithConfig(conf)
-	} else if vars.APIConfig.Knowledge.Provider == "openai" {
-		c = openai.NewClient(vars.APIConfig.Knowledge.Key)
-	}
-	ctx := context.Background()
-	speakReady := make(chan string)
+func removeSpecialCharacters(str string) string {
+	// Define the regular expression to match special characters
+	re := regexp.MustCompile(`[&^*#@]`)
+	// Replace special characters with an empty string
+	return re.ReplaceAllString(str, "")
+}
 
+func CreateAIReq(transcribedText, esn string, gpt3tryagain bool) openai.ChatCompletionRequest {
 	defaultPrompt := "You are a helpful, animated robot called Vector. Keep the response concise yet informative."
 
 	var nChat []openai.ChatCompletionMessage
@@ -99,7 +84,19 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string) (string
 		smsg.Content = defaultPrompt
 	}
 
-	smsg.Content = CreatePrompt(smsg.Content)
+	var model string
+
+	if gpt3tryagain {
+		model = openai.GPT3Dot5Turbo
+	} else if vars.APIConfig.Knowledge.Provider == "openai" {
+		model = openai.GPT4o
+		logger.Println("Using " + model)
+	} else {
+		logger.Println("Using " + vars.APIConfig.Knowledge.Model)
+		model = vars.APIConfig.Knowledge.Model
+	}
+
+	smsg.Content = CreatePrompt(smsg.Content, model)
 
 	nChat = append(nChat, smsg)
 	if vars.APIConfig.Knowledge.SaveChat {
@@ -113,23 +110,46 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string) (string
 	})
 
 	aireq := openai.ChatCompletionRequest{
-		MaxTokens: 2048,
-		Messages:  nChat,
-		Stream:    true,
+		Model:            model,
+		MaxTokens:        2048,
+		Temperature:      1,
+		TopP:             1,
+		FrequencyPenalty: 0,
+		PresencePenalty:  0,
+		Messages:         nChat,
+		Stream:           true,
 	}
-	if vars.APIConfig.Knowledge.Provider == "openai" {
-		aireq.Model = "gpt-4-turbo"
-		logger.Println("Using " + aireq.Model)
-	} else {
-		logger.Println("Using " + vars.APIConfig.Knowledge.Model)
-		aireq.Model = vars.APIConfig.Knowledge.Model
+	return aireq
+}
+
+func StreamingKGSim(req interface{}, esn string, transcribedText string) (string, error) {
+	var fullRespText string
+	var fullfullRespText string
+	var fullRespSlice []string
+	var isDone bool
+	var c *openai.Client
+	if vars.APIConfig.Knowledge.Provider == "together" {
+		if vars.APIConfig.Knowledge.Model == "" {
+			vars.APIConfig.Knowledge.Model = "meta-llama/Llama-3-70b-chat-hf"
+			vars.WriteConfigToDisk()
+		}
+		conf := openai.DefaultConfig(vars.APIConfig.Knowledge.Key)
+		conf.BaseURL = "https://api.together.xyz/v1"
+		c = openai.NewClientWithConfig(conf)
+	} else if vars.APIConfig.Knowledge.Provider == "openai" {
+		c = openai.NewClient(vars.APIConfig.Knowledge.Key)
 	}
+	ctx := context.Background()
+	speakReady := make(chan string)
+
+	aireq := CreateAIReq(transcribedText, esn, false)
+
 	stream, err := c.CreateChatCompletionStream(ctx, aireq)
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") && vars.APIConfig.Knowledge.Provider == "openai" {
 			logger.Println("GPT-4 model cannot be accessed with this API key. You likely need to add more than $5 dollars of funds to your OpenAI account.")
 			logger.LogUI("GPT-4 model cannot be accessed with this API key. You likely need to add more than $5 dollars of funds to your OpenAI account.")
-			aireq.Model = openai.GPT3Dot5Turbo
+			aireq := CreateAIReq(transcribedText, esn, true)
 			logger.Println("Falling back to " + aireq.Model)
 			logger.LogUI("Falling back to " + aireq.Model)
 			stream, err = c.CreateChatCompletionStream(ctx, aireq)
@@ -141,13 +161,16 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string) (string
 			return "", err
 		}
 	}
-	//defer stream.Close()
-
+	nChat := aireq.Messages
+	nChat = append(nChat, openai.ChatCompletionMessage{
+		Role: openai.ChatMessageRoleAssistant,
+	})
 	fmt.Println("LLM stream response: ")
 	go func() {
 		for {
 			response, err := stream.Recv()
 			if errors.Is(err, io.EOF) {
+				// if fullRespSlice != fullRespText, add that missing bit to fullRespSlice
 				isDone = true
 				newStr := fullRespSlice[0]
 				for i, str := range fullRespSlice {
@@ -156,8 +179,21 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string) (string
 					}
 					newStr = newStr + " " + str
 				}
+				if strings.TrimSpace(newStr) != strings.TrimSpace(fullfullRespText) {
+					logger.Println("LLM debug: there is content after the last punctuation mark")
+					extraBit := strings.TrimPrefix(fullRespText, newStr)
+					fullRespSlice = append(fullRespSlice, extraBit)
+				}
 				if vars.APIConfig.Knowledge.SaveChat {
-					Remember(transcribedText, newStr, esn)
+					Remember(openai.ChatCompletionMessage{
+						Role:    openai.ChatMessageRoleUser,
+						Content: transcribedText,
+					},
+						openai.ChatCompletionMessage{
+							Role:    openai.ChatMessageRoleAssistant,
+							Content: newStr,
+						},
+						esn)
 				}
 				logger.LogUI("LLM response for " + esn + ": " + newStr)
 				logger.Println("LLM stream finished")
@@ -169,7 +205,8 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string) (string
 				return
 			}
 
-			fullRespText = fullRespText + response.Choices[0].Delta.Content
+			fullfullRespText = fullfullRespText + removeSpecialCharacters(response.Choices[0].Delta.Content)
+			fullRespText = fullRespText + removeSpecialCharacters(response.Choices[0].Delta.Content)
 			if strings.Contains(fullRespText, "...") || strings.Contains(fullRespText, ".'") || strings.Contains(fullRespText, ".\"") || strings.Contains(fullRespText, ".") || strings.Contains(fullRespText, "?") || strings.Contains(fullRespText, "!") {
 				var sepStr string
 				if strings.Contains(fullRespText, "...") {
@@ -188,7 +225,6 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string) (string
 				splitResp := strings.Split(strings.TrimSpace(fullRespText), sepStr)
 				fullRespSlice = append(fullRespSlice, strings.TrimSpace(splitResp[0])+sepStr)
 				fullRespText = splitResp[1]
-				//fmt.Println("FROM OPENAI: " + splitResp[0])
 				select {
 				case speakReady <- strings.TrimSpace(splitResp[0]) + sepStr:
 				default:
@@ -310,6 +346,7 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string) (string
 				}
 			}()
 		}
+		var disconnect bool
 		numInResp := 0
 		for {
 			respSlice := fullRespSlice
@@ -326,7 +363,11 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string) (string
 			}
 			logger.Println(respSlice[numInResp])
 			acts := GetActionsFromString(respSlice[numInResp])
-			PerformActions(acts, robot)
+			nChat[len(nChat)-1].Content = fullRespText
+			disconnect = PerformActions(nChat, acts, robot)
+			if disconnect {
+				break
+			}
 			numInResp = numInResp + 1
 		}
 		if !vars.APIConfig.Knowledge.CommandsEnable {
@@ -336,15 +377,15 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string) (string
 			}
 		}
 		time.Sleep(time.Millisecond * 100)
-		robot.Conn.PlayAnimation(
-			ctx,
-			&vectorpb.PlayAnimationRequest{
-				Animation: &vectorpb.Animation{
-					Name: "anim_knowledgegraph_success_01",
-				},
-				Loops: 1,
-			},
-		)
+		// robot.Conn.PlayAnimation(
+		// 	ctx,
+		// 	&vectorpb.PlayAnimationRequest{
+		// 		Animation: &vectorpb.Animation{
+		// 			Name: "anim_knowledgegraph_success_01",
+		// 		},
+		// 		Loops: 1,
+		// 	},
+		// )
 		//time.Sleep(time.Millisecond * 3300)
 		stop <- true
 	}
